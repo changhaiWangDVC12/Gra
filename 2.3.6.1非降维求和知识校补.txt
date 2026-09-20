@@ -1,0 +1,135 @@
+一、核心一句话
+
+按自己的理解：5行1列和5行的区别（保留着一个维度，通过keepdims=True进行实现）
+
+
+    keepdims 不改变任何一个数值，只改变结果的形状。
+    降维（默认）：被压掉的那一维从形状里「删掉」；
+    keepdims=True：被压掉的那一维「留成 1」。
+
+    书上例子：A 的形状是 (5, 4)
+
+        A.sum(axis=1)                 -> 形状 (5,)    数值 [6, 22, 38, 54, 70]
+        A.sum(axis=1, keepdims=True)  -> 形状 (5, 1)  数值 [[6],[22],[38],[54],[70]]
+
+    实测确认两者数值完全相同：
+        np.allclose(A.sum(axis=1), A.sum(axis=1, keepdims=True).ravel()) = True
+
+二、为什么需要它：因为广播是从最右边对齐的
+
+这才是 keepdims 存在的唯一理由。你既然想算 A 除以「每行的和」，那就得看这两个东西能不能对上：
+
+    A      : (5, 4)
+    sum_A  :    (5,)      <- 不带 keepdims
+
+numpy 广播时的对齐规则是「从最后一维往前比」。(5,) 会被当成 (1, 5)：
+
+    A      : (5, 4)
+    对齐   : (1, 5)
+               ↑ 最后一维 4 vs 5，对不上
+
+实测结果（不是猜的，真报错）：
+
+    ValueError: operands could not be broadcast together with shapes (5,4) (5,)
+
+换成 keepdims=True，形状变成 (5, 1)：
+
+    A      : (5, 4)
+    对齐   : (5, 1)
+                 ↑ 1 可以广播成 4
+
+        A / sum_A =
+        [[0.     0.1667 0.3333 0.5   ]
+         [0.1818 0.2273 0.2727 0.3182]
+         [0.2105 0.2368 0.2632 0.2895]
+         [0.2222 0.2407 0.2593 0.2778]
+         [0.2286 0.2429 0.2571 0.2714]]
+
+        每一行的和 = [1. 1. 1. 1. 1.]   ← 行归一化成功
+
+三、广播到底做了什么（这一步想通了就全通了）
+
+(5,1) 里的那个 1，会被「横向复制」到 4 份，实际参与运算的是：
+
+    [[ 6.  6.  6.  6.]
+     [22. 22. 22. 22.]
+     [38. 38. 38. 38.]
+     [54. 54. 54. 54.]
+     [70. 70. 70. 70.]]
+
+也就是 A 的每个元素除以「它所在那一行的和」。这才是「逐行归一化」的含义。
+
+手算第 0 行验证：0/6=0，1/6=0.1667，2/6=0.3333，3/6=0.5 ✔
+
+四、为什么书里反复强调这件事（这里有个真会咬人的坑）
+
+形状 (5,) 和 (5,1) 看着几乎一样，语义完全不同：
+
+    (5,)   = 一串 5 个数，它没有「行」也没有「列」的概念
+    (5,1)  = 一张 5 行 1 列的表，它有明确的「行」对齐关系
+
+如果 A 是方阵，不带 keepdims 不但不报错，还会静默算错。我拿 5x5 的 S 实测：
+
+    S / S.sum(axis=1)        第0行 = [0.0667 0.05 0.0462 0.0444 0.0435]  行和 = 0.2507  ✗
+    S / S.sum(axis=1, keepdims=True)  第0行 = [0.0667 0.1333 0.2 0.2667 0.3333]  行和 = 1.0  ✔
+
+原因：(5,) 被对齐成了 (1,5)，于是它把每一「列」除以了 s[列号]，方向反了。数据不会报错，看起来还挺像归一化的，错误要等到模型训练效果莫名其妙时才会暴露。
+
+这就是为什么 d2l 里到处写 keepdims=True —— 不是啰嗦，是防这个静默错误。你后面 3.4 节 softmax 的实现（X_exp / X_exp.sum(1, keepdim=True)）用的就是同一招。
+
+五、三种写法完全等价（实测对得上）
+
+    A / A.sum(axis=1, keepdims=True)
+    A / A.sum(axis=1).reshape(-1, 1)
+    A / A.sum(axis=1)[:, None]
+
+第 0 行结果都是 [0. 0.1667 0.3333 0.5]。keepdims=True 只是最不用动脑的那种。
+
+六、mean / max / std 规则完全一样，而且这三个预处理你毕设里一定会用到
+
+    A.mean(axis=1).shape                = (5,)
+    A.mean(axis=1, keepdims=True).shape = (5, 1)
+
+    (a) 行归一化（就是上面那个）：
+        (A / A.sum(axis=1, keepdims=True)).sum(axis=1) = [1. 1. 1. 1. 1.]
+
+    (b) 按行中心化：每行减去本行均值，结果每行均值变 0
+        centered = A - A.mean(axis=1, keepdims=True)
+        centered.mean(axis=1) = [0. 0. 0. 0. 0.]
+
+    (c) 按列标准化（特征标准化，axis=0 + keepdims）：
+        mu = A.mean(axis=0, keepdims=True)    形状 (1, 4)
+        sd = A.std(axis=0, keepdims=True)     形状 (1, 4)
+        z  = (A - mu) / sd
+        标准化后每列均值 = [0. 0. 0. 0.]   每列标准差 = [1. 1. 1. 1.]
+
+    (c) 是自动驾驶数据预处理里最常用的一步——不同传感器特征量纲差好几个数量级时，必须先干这个。
+
+七、高维一样适用
+
+    B = np.arange(24).reshape(2, 3, 4)     形状 (2, 3, 4)
+
+    B.sum(axis=1).shape                = (2, 4)
+    B.sum(axis=1, keepdims=True).shape = (2, 1, 4)      ← 第1维留成 1
+    B.sum(axis=(1,2)).shape            = (2,)
+    B.sum(axis=(1,2), keepdims=True).shape = (2, 1, 1)  ← 两维都留成 1
+
+    用处：把每个样本归一化成概率分布
+    norm = B / B.sum(axis=(1,2), keepdims=True)
+    norm.sum(axis=(1,2)) = [1. 1.]   ✔
+
+八、一个实操注意：不同框架的关键字单复数不一样
+
+    numpy   : A.sum(axis=1, keepdims=True)     复数
+    MXNet   : keepdims=True                    复数
+    TensorFlow: keepdims=True                  复数（很老的版本叫 keep_dims）
+    PyTorch : torch.sum(x, dim=1, keepdim=True)   单数，且轴名是 dim 不是 axis
+    Paddle  : paddle.sum(x, axis=1, keepdim=True) 单数
+
+我在 numpy 里写单数实测会报：TypeError: _sum() got an unexpected keyword argument 'keepdim'。
+PyTorch/Paddle 那两行我是按官方 API 语义写的——这台服务器上没装 torch，你在自己的 D:\gd\.venv 里 pip install torch 之后可以自己验一遍，写法差别确实是这样（PyTorch 用 dim + keepdim）。
+
+九、记忆法（就一句）
+
+    axis 决定「压哪一维」，keepdims 决定「压完之后这一维是删掉还是留成 1」。
+    只要你接下来要把这个结果拿回去和原数组做加减乘除，就写 keepdims=True。

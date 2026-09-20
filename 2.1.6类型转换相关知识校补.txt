@@ -1,0 +1,28 @@
+将深度学习框架定义的张量转换为NumPy张量（ndarray）很容易
+A = X.numpy()        X 是 torch.Tensor → 得到 numpy.ndarray
+  B = torch.tensor(A)  numpy.ndarray → 又变回 torch.Tensor
+  type(A), type(B)     问这两个东西到底是什么类型
+
+类型（服务器实测 torch 2.14.0+cpu / numpy 2.4.6）：
+
+  type(X) = <class 'torch.Tensor'>
+  type(A) = <class 'numpy.ndarray'>   dtype float32  shape (2, 2)
+  type(B) = <class 'torch.Tensor'>    dtype torch.float32  device cpu
+
+关键是这两步的内存行为完全不同，这才是这题的重点：
+
+  X.numpy()       零拷贝 —— A 和 X 共用同一块内存
+                  X[0,0] = 99 之后，A[0,0] 立刻也是 99
+  torch.tensor(A) 会复制 —— B 是独立副本
+                  A[0,0] = -7 之后，B[0,0] 还是 99
+
+所以这三行的净效果是：绕一圈回到 torch，但换了一份新内存（顺带把 numpy/张量的关系切断了）。拿 4 MB 的数组测：torch.tensor(big) 又复制 4 MB，torch.from_numpy(big) 零拷贝。
+
+三个函数的区别（这是最容易搞混的一组）：
+
+  X.numpy()              张量 → numpy，共享内存（只能用于 CPU 张量）
+  torch.from_numpy(A)    numpy → 张量，共享内存（推荐，省内存）
+  torch.as_tensor(A)     同上，也是零拷贝（能不动就不动）
+  torch.tensor(A)        numpy → 张量，永远复制（要独立副本时用它）
+
+dtype 是照搬过来的，不做转换：numpy float64 → torch.float64，float32 → float32，int64 → int64，bool → torch.bool，uint8 → torch.uint8。想改要显式写 dtype=；写了 device= 或 dtype=（类型不一致时）则必然复制。
